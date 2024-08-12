@@ -10,11 +10,15 @@ import javax.xml.stream.events.EndElement;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
 import java.io.BufferedInputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.Period;
+import java.time.temporal.ChronoUnit;
 
 
 public class Main {
@@ -42,6 +46,8 @@ public class Main {
 
 		String title = "";
 		StringBuilder text = new StringBuilder();
+
+		long length = new File(file).length();
 
 		try (FileInputStream fileInputStream = new FileInputStream(file);
 				 BufferedInputStream bufferedInputStream = new BufferedInputStream(fileInputStream, defaultBufferSize);
@@ -93,7 +99,12 @@ public class Main {
 						preparedStatement.setString(4, title);
 						preparedStatement.execute();
 
-						if (count % 10000 == 0) System.out.println(Instant.now() + ": " + count + ": " + title);
+						if (count % 1000 == 0) {
+							System.out.print(Instant.now().truncatedTo(ChronoUnit.SECONDS) + ": ");
+							System.out.print("ETA: " + getEta(length, compressorInputStream.getCompressedCount(), start) + ": ");
+							System.out.print(getPercent(compressorInputStream.getCompressedCount(), length) + "% \t: ");
+							System.out.println(title);
+						}
 
 						isTitle = false;
 						isText = false;
@@ -113,6 +124,24 @@ public class Main {
 			long msPerRecord = ms / count;
 			System.err.println("Processed " + count + " in " + ms + " ms (" + msPerRecord + " ms/record)");
 		}
+	}
+
+	private static String getEta(long total,
+															 long current,
+															 long start) {
+		float ms = System.currentTimeMillis() - start;
+		float completed = current / (float) total;
+		float toGo = 1.0F - completed;
+
+		float msToGo = toGo / (completed / ms);
+
+		Instant etaInstant = Instant.now().plusMillis((long) msToGo);
+		return Duration.between(Instant.now(), etaInstant).truncatedTo(ChronoUnit.SECONDS) + " (" + etaInstant.truncatedTo(ChronoUnit.SECONDS) + ")\t";
+	}
+
+	private static float getPercent(long current,
+																	long length) {
+		return (current / (float) length) * 100F;
 	}
 
 }
