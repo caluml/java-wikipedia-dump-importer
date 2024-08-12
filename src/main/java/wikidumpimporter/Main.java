@@ -14,6 +14,10 @@ import java.io.FileInputStream;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.time.Instant;
+
+import static jdk.xml.internal.JdkConstants.JDK_TOTAL_ENTITY_SIZE_LIMIT;
+import static jdk.xml.internal.JdkConstants.SP_TOTAL_ENTITY_SIZE_LIMIT;
 
 public class Main {
 
@@ -29,30 +33,33 @@ public class Main {
 	 * );
 	 */
 
-	public static void main(String[] args) throws Exception {
+	public static void main(String[] args) {
 		boolean decompressConcatenated = true;
 		int defaultBufferSize = 1024 * 1024 * 64;
 		String file = args[0];
+
+		long start = System.currentTimeMillis();
+		int count = 0;
+
+		String title = "";
+		String text = "";
+
 		try (FileInputStream fileInputStream = new FileInputStream(file);
 				 BufferedInputStream bufferedInputStream = new BufferedInputStream(fileInputStream, defaultBufferSize);
 				 BZip2CompressorInputStream compressorInputStream = new BZip2CompressorInputStream(bufferedInputStream, decompressConcatenated)) {
 
 			XMLInputFactory xmlInputFactory = XMLInputFactory.newFactory();
+			xmlInputFactory.setProperty(JDK_TOTAL_ENTITY_SIZE_LIMIT, "0");
+			xmlInputFactory.setProperty(SP_TOTAL_ENTITY_SIZE_LIMIT, "0");
 			xmlInputFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
 			xmlInputFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
 			XMLEventReader reader = xmlInputFactory.createXMLEventReader(compressorInputStream, "UTF-8");
-
-			String title = "";
-			String text = "";
 
 			boolean isTitle = false;
 			boolean isText = false;
 
 			Class.forName("org.postgresql.Driver");
 			Connection connection = DriverManager.getConnection(args[1], args[2], args[3]);
-
-			long start = System.currentTimeMillis();
-			int count = 0;
 
 			while (reader.hasNext()) {
 				XMLEvent event = reader.nextEvent();
@@ -88,7 +95,8 @@ public class Main {
 						preparedStatement.setString(3, text);
 						preparedStatement.setString(4, title);
 						preparedStatement.execute();
-						System.out.println(title + " (" + text.length() + ")");
+
+						if (count % 10000 == 0) System.out.println(count + ": " + title);
 
 						isTitle = false;
 						isText = false;
@@ -98,7 +106,12 @@ public class Main {
 					}
 				}
 			}
-
+		} catch (Exception e) {
+			System.err.println("Error processing record " + count + ": " + title + ", " + text);
+			e.printStackTrace(System.err);
+		} finally {
+			System.err.println("Started at  " + Instant.ofEpochMilli(start));
+			System.err.println("Finished at " + Instant.now());
 			long ms = System.currentTimeMillis() - start;
 			long msPerRecord = ms / count;
 			System.err.println("Processed " + count + " in " + ms + " ms (" + msPerRecord + " ms/record)");
