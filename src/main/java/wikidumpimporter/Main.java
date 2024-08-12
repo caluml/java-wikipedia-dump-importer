@@ -16,8 +16,6 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.time.Instant;
 
-import static jdk.xml.internal.JdkConstants.JDK_TOTAL_ENTITY_SIZE_LIMIT;
-import static jdk.xml.internal.JdkConstants.SP_TOTAL_ENTITY_SIZE_LIMIT;
 
 public class Main {
 
@@ -34,6 +32,7 @@ public class Main {
 	 */
 
 	public static void main(String[] args) {
+		System.setProperty("jdk.xml.totalEntitySizeLimit", "0");
 		boolean decompressConcatenated = true;
 		int defaultBufferSize = 1024 * 1024 * 64;
 		String file = args[0];
@@ -42,15 +41,13 @@ public class Main {
 		int count = 0;
 
 		String title = "";
-		String text = "";
+		StringBuilder text = new StringBuilder();
 
 		try (FileInputStream fileInputStream = new FileInputStream(file);
 				 BufferedInputStream bufferedInputStream = new BufferedInputStream(fileInputStream, defaultBufferSize);
 				 BZip2CompressorInputStream compressorInputStream = new BZip2CompressorInputStream(bufferedInputStream, decompressConcatenated)) {
 
 			XMLInputFactory xmlInputFactory = XMLInputFactory.newFactory();
-			xmlInputFactory.setProperty(JDK_TOTAL_ENTITY_SIZE_LIMIT, "0");
-			xmlInputFactory.setProperty(SP_TOTAL_ENTITY_SIZE_LIMIT, "0");
 			xmlInputFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
 			xmlInputFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
 			XMLEventReader reader = xmlInputFactory.createXMLEventReader(compressorInputStream, "UTF-8");
@@ -79,7 +76,7 @@ public class Main {
 					}
 					if (isText) {
 						if (characters.getData() != null) {
-							text = text + characters.getData();
+							text.append(characters.getData());
 						}
 					}
 				}
@@ -91,17 +88,17 @@ public class Main {
 						PreparedStatement preparedStatement = connection.prepareStatement("INSERT INTO pages (title, text) VALUES (?, ?) " +
 																																							"ON CONFLICT (title) DO UPDATE SET text = ? WHERE pages.title = ?");
 						preparedStatement.setString(1, title);
-						preparedStatement.setString(2, text);
-						preparedStatement.setString(3, text);
+						preparedStatement.setString(2, text.toString());
+						preparedStatement.setString(3, text.toString());
 						preparedStatement.setString(4, title);
 						preparedStatement.execute();
 
-						if (count % 10000 == 0) System.out.println(count + ": " + title);
+						if (count % 10000 == 0) System.out.println(Instant.now() + ": " + count + ": " + title);
 
 						isTitle = false;
 						isText = false;
 						title = "";
-						text = "";
+						text = new StringBuilder();
 						count++;
 					}
 				}
