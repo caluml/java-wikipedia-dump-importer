@@ -26,12 +26,16 @@ public class Main {
 	private static final String TITLE = "title";
 
 	/*
+	 * https://github.com/caluml/java-wikipedia-dump-importer/
+	 * 
 	 * CREATE USER wiki ENCRYPTED PASSWORD 'wiki';
 	 * CREATE DATABASE wiki OWNER wiki ENCODING 'UTF-8';
 	 * CREATE TABLE pages (
 	 *   title varchar NOT NULL PRIMARY KEY,
 	 *   text varchar NOT NULL
 	 * );
+	 *
+	 * java -jar wikidump-importer.jar jdbc://postgres/db username password [batchsize]
 	 */
 
 	public static void main(String[] args) {
@@ -40,6 +44,11 @@ public class Main {
 		int defaultBufferSize = 1024 * 1024 * 64;
 		String file = args[0];
 
+		int batchSize = args[4] == null ? 1000 : Integer.parseInt(args[4]);
+
+		System.out.println("File: " + file);
+		System.out.println("Batchsize: " + batchSize);
+
 		long start = System.currentTimeMillis();
 		int count = 0;
 
@@ -47,6 +56,9 @@ public class Main {
 		StringBuilder text = new StringBuilder();
 
 		long length = new File(file).length();
+
+		String sql = "INSERT INTO pages (title, text) VALUES (?, ?) " +
+								 "ON CONFLICT (title) DO UPDATE SET text = EXCLUDED.text";
 
 		try (FileInputStream fileInputStream = new FileInputStream(file);
 				 BufferedInputStream bufferedInputStream = new BufferedInputStream(fileInputStream, defaultBufferSize);
@@ -61,58 +73,68 @@ public class Main {
 			boolean isText = false;
 
 			Class.forName("org.postgresql.Driver");
-			Connection connection = DriverManager.getConnection(args[1], args[2], args[3]);
 
-			while (reader.hasNext()) {
-				XMLEvent event = reader.nextEvent();
+			try (Connection connection = DriverManager.getConnection(args[1], args[2], args[3]);
+					 PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-				if (event.isStartElement()) {
-					StartElement startElement = event.asStartElement();
-					String localPart = startElement.getName().getLocalPart();
-					if (localPart.equals(TITLE)) isTitle = true;
-					if (localPart.equals(TEXT)) isText = true;
-				}
+				connection.setAutoCommit(false);
 
-				if (event.isCharacters()) {
-					Characters characters = event.asCharacters();
-					if (isTitle) {
-						title = characters.getData();
-						isTitle = false;
+				while (reader.hasNext()) {
+					XMLEvent event = reader.nextEvent();
+
+					if (event.isStartElement()) {
+						StartElement startElement = event.asStartElement();
+						String localPart = startElement.getName().getLocalPart();
+						if (localPart.equals(TITLE)) isTitle = true;
+						if (localPart.equals(TEXT)) isText = true;
 					}
-					if (isText) {
-						if (characters.getData() != null) {
-							text.append(characters.getData());
+
+					if (event.isCharacters()) {
+						Characters characters = event.asCharacters();
+						if (isTitle) {
+							title = characters.getData();
+							isTitle = false;
+						}
+						if (isText) {
+							if (characters.getData() != null) {
+								text.append(characters.getData());
+							}
+						}
+					}
+
+					if (event.isEndElement()) {
+						EndElement endElement = event.asEndElement();
+						if (endElement.getName().getLocalPart().equals(TEXT)) {
+
+							preparedStatement.setString(1, title);
+							preparedStatement.setString(2, text.toString());
+							preparedStatement.addBatch();
+
+							count++;
+
+							if (count % batchSize == 0) {
+								preparedStatement.executeBatch();
+								connection.commit();
+
+								System.out.print(Instant.now().truncatedTo(ChronoUnit.SECONDS) + ": ");
+								System.out.print("ETA: " + getEta(length, compressorInputStream.getCompressedCount(), start) + ": ");
+								System.out.print(getPercent(compressorInputStream.getCompressedCount(), length) + "% \t: ");
+								System.out.println(title);
+							}
+
+							isTitle = false;
+							isText = false;
+							title = "";
+							text.setLength(0);
 						}
 					}
 				}
 
-				if (event.isEndElement()) {
-					EndElement endElement = event.asEndElement();
-					if (endElement.getName().getLocalPart().equals(TEXT)) {
-
-						PreparedStatement preparedStatement = connection.prepareStatement("INSERT INTO pages (title, text) VALUES (?, ?) " +
-																																							"ON CONFLICT (title) DO UPDATE SET text = ? WHERE pages.title = ?");
-						preparedStatement.setString(1, title);
-						preparedStatement.setString(2, text.toString());
-						preparedStatement.setString(3, text.toString());
-						preparedStatement.setString(4, title);
-						preparedStatement.execute();
-
-						if (count % 1000 == 0) {
-							System.out.print(Instant.now().truncatedTo(ChronoUnit.SECONDS) + ": ");
-							System.out.print("ETA: " + getEta(length, compressorInputStream.getCompressedCount(), start) + ": ");
-							System.out.print(getPercent(compressorInputStream.getCompressedCount(), length) + "% \t: ");
-							System.out.println(title);
-						}
-
-						isTitle = false;
-						isText = false;
-						title = "";
-						text = new StringBuilder();
-						count++;
-					}
-				}
+				// Execute and commit any remaining records in the final batch
+				preparedStatement.executeBatch();
+				connection.commit();
 			}
+
 		} catch (Exception e) {
 			System.err.println("Error processing record " + count + ": " + title + ", " + text);
 			e.printStackTrace(System.err);
@@ -120,7 +142,7 @@ public class Main {
 			System.err.println("Started at  " + Instant.ofEpochMilli(start));
 			System.err.println("Finished at " + Instant.now());
 			long ms = System.currentTimeMillis() - start;
-			long msPerRecord = ms / count;
+			long msPerRecord = count > 0 ? ms / count : 0;
 			System.err.println("Processed " + count + " in " + ms + " ms (" + msPerRecord + " ms/record)");
 		}
 	}
@@ -128,19 +150,20 @@ public class Main {
 	private static String getEta(long total,
 															 long current,
 															 long start) {
-		float ms = System.currentTimeMillis() - start;
-		float completed = current / (float) total;
-		float toGo = 1.0F - completed;
+		if (current == 0) return "Calculating ETA...\t";
 
-		float msToGo = toGo / (completed / ms);
+		long elapsedMs = System.currentTimeMillis() - start;
 
-		Instant etaInstant = Instant.now().plusMillis((long) msToGo);
-		return Duration.between(Instant.now(), etaInstant).truncatedTo(ChronoUnit.SECONDS) + " (" + etaInstant.truncatedTo(ChronoUnit.SECONDS) + ")\t";
+		long msToGo = (long) ((double) elapsedMs * (total - current) / current);
+
+		Duration remaining = Duration.ofMillis(msToGo);
+		Instant etaInstant = Instant.now().plusMillis(msToGo);
+
+		return remaining.truncatedTo(ChronoUnit.SECONDS) + " @ " + etaInstant.truncatedTo(ChronoUnit.SECONDS) + "\t";
 	}
 
 	private static float getPercent(long current,
 																	long length) {
 		return (current / (float) length) * 100F;
 	}
-
 }
